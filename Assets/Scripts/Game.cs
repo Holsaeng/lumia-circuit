@@ -21,14 +21,34 @@ public class Game : MonoBehaviour
     class Drone
     {
         public Mover m = new Mover();
-        public Transform tr, ring, wingL, wingR;
+        public Transform tr, ring;
         public Material glow;
         public Color color;
-        public Light light;
+        public Rig rig;
         public int kind, patrol;
         public float dock;
         public bool vulnerable;
         public Vector2Int home;
+    }
+
+    // ---------- 절차적 애니메이션: 모델 부품마다 회전 축(피벗)을 만들어 코드로 움직인다 ----------
+    class Part
+    {
+        public Transform t;
+        public Quaternion baseRel;
+        public Vector3 right, up, fwd;   // 부모 기준으로 본 캐릭터의 오른쪽·위·앞
+        public float phase, side;
+    }
+
+    class Rig
+    {
+        public string kind;
+        public Transform holder, model;
+        public Quaternion modelBase; public Vector3 modelBasePos, modelBaseScale;
+        public readonly List<Part> legs = new List<Part>(), wings = new List<Part>(), tails = new List<Part>(),
+            antennas = new List<Part>(), eyes = new List<Part>();
+        public float gait, move, roll, squash, blinkT = 2f, lastYaw;
+        public Vector3 lastPos; public bool init;
     }
 
     const float ModelYaw = 180f;      // Blender -Y 정면 → Unity 진행 방향
@@ -48,6 +68,8 @@ public class Game : MonoBehaviour
     GameObject[] zoneQuads; Material[] zoneMats;
     int zone = -1; float zoneT, fuse = FuseMax; bool zoneLive;
     Light sunLight; Text fuseText; Image panel;
+    Transform foam;
+    readonly List<Light> lamps = new List<Light>();
 
     Material litBase, wallGlow;
     readonly Dictionary<string, Material> mats = new Dictionary<string, Material>();
@@ -57,6 +79,7 @@ public class Game : MonoBehaviour
 
     Mover player = new Mover();
     Transform playerT, playerRing;
+    Rig playerRig;
     Light playerLight;
     Vector2Int want, facing = Vector2Int.down;
     Drone[] drones;
@@ -78,7 +101,7 @@ public class Game : MonoBehaviour
     Text scoreText, hiText, livesText, centerText, popText;
     float popT;
 
-    string shotPath; bool autopilot; int shotStage;
+    string shotPath; bool autopilot; int shotStage, startLevel = 1;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     static void Boot()
@@ -92,6 +115,7 @@ public class Game : MonoBehaviour
         Application.targetFrameRate = 120;
         var args = Environment.GetCommandLineArgs();
         for (int i = 0; i < args.Length - 1; i++) if (args[i] == "-shot") { shotPath = args[i + 1]; autopilot = true; }
+        for (int i = 0; i < args.Length - 1; i++) if (args[i] == "-startlevel" && int.TryParse(args[i + 1], out var sl)) startLevel = Mathf.Max(1, sl);
         if (autopilot) PlayerPrefs.DeleteKey("hi");
 
         Maze.Load();
@@ -116,7 +140,18 @@ public class Game : MonoBehaviour
         m.SetColor("_EmissionColor", emis);
         m.SetFloat("_Metallic", metal);
         m.SetFloat("_Smoothness", smooth);
+        Color oc = baseC * 0.28f; oc.a = 1;                 // 외곽선 = 바탕색을 어둡게
+        m.SetColor("_OutlineColor", oc);
         if (name != null) mats[name] = m;
+        return m;
+    }
+
+    /// 지형·바닥·작은 아이템처럼 외곽선과 테두리 빛이 필요 없는 재질
+    static Material Flat(Material m, float vertexAO = 0)
+    {
+        m.SetShaderPassEnabled("SRPDefaultUnlit", false);
+        m.SetFloat("_Rim", 0);
+        m.SetFloat("_VertexAO", vertexAO);
         return m;
     }
     // 눈에 잘 띄어야 하는 것(아이템·상태 표시)만 아주 약하게 스스로 빛난다. 번쩍이는 발광은 쓰지 않는다.
@@ -125,7 +160,8 @@ public class Game : MonoBehaviour
 
     void BuildMaterials()
     {
-        litBase = Resources.Load<Material>("Materials/LitBase");
+        litBase = Resources.Load<Material>("Materials/ToonBase");
+        if (litBase == null) litBase = Resources.Load<Material>("Materials/LitBase");
         if (litBase == null) litBase = new Material(Shader.Find("Universal Render Pipeline/Lit"));
         litBase.EnableKeyword("_EMISSION");
         // 루미 (보급 로봇)
@@ -137,17 +173,109 @@ public class Game : MonoBehaviour
         Matte("FurDark", 0.16f, 0.14f, 0.2f); Matte("FurPurple", 0.36f, 0.24f, 0.48f);
         Matte("Comb", 0.85f, 0.12f, 0.14f); Matte("Snout", 0.78f, 0.55f, 0.5f); Matte("Bone", 0.95f, 0.92f, 0.82f);
         // 아이템
-        Mat("CellGlow", new Color(1f, 0.78f, 0.2f), new Color(1f, 0.78f, 0.2f) * 0.25f, 0.3f, 0.35f);
+        Flat(Mat("CellGlow", new Color(1f, 0.78f, 0.2f), new Color(1f, 0.78f, 0.2f) * 0.25f, 0.3f, 0.35f));
         GlowMat("CoreGlow", new Color(0.9f, 0.1f, 0.18f), 0.5f);
         GlowMat("BonusGlow", new Color(0.3f, 0.9f, 0.45f), 0.4f);
         Matte("Crate", 0.3f, 0.36f, 0.44f);
         // 소품·지형
         Matte("Leaf", 0.2f, 0.45f, 0.18f); Matte("LeafLight", 0.35f, 0.58f, 0.22f); Matte("Trunk", 0.35f, 0.24f, 0.15f);
         Matte("Stone", 0.52f, 0.52f, 0.54f); Matte("Wood", 0.62f, 0.45f, 0.27f); Matte("WoodDark", 0.4f, 0.27f, 0.16f);
-        Matte("Floor", 0.5f, 0.4f, 0.27f); Matte("Wall", 0.2f, 0.42f, 0.18f);
-        wallGlow = Matte("WallCap", 0.28f, 0.52f, 0.22f);
-        Matte("Grass", 0.36f, 0.56f, 0.26f); Matte("Sand", 0.85f, 0.77f, 0.56f);
-        Mat("Sea", new Color(0.12f, 0.42f, 0.58f), Color.black, 0, 0.3f);
+        Flat(Matte("Floor", 0.5f, 0.4f, 0.27f), 1); Flat(Matte("Wall", 0.2f, 0.42f, 0.18f), 1);
+        wallGlow = Flat(Matte("WallCap", 0.28f, 0.52f, 0.22f), 1);
+        Flat(Matte("Grass", 0.36f, 0.56f, 0.26f)); Flat(Matte("Sand", 0.85f, 0.77f, 0.56f));
+        var sea = Flat(Mat("Sea", new Color(0.12f, 0.42f, 0.58f), Color.black, 0, 0.3f));
+        sea.SetFloat("_WaveAmp", 0.05f); sea.SetFloat("_Spec", 0.5f);
+        Flat(Matte("Foam", 0.92f, 0.95f, 0.96f));
+        // 가로등
+        Matte("LampPole", 0.2f, 0.21f, 0.24f);
+        Mat("LampGlow", new Color(1f, 0.86f, 0.6f), Color.black, 0, 0.1f);
+    }
+
+    // ------------------------------------------------------------------ 지형 메시
+    /// 미로 바닥: 셀당 4×4 격자. 담에 가까운 정점일수록 어둡게(구석 그늘을 미리 구워 둔다).
+    static Mesh BuildFloorMesh()
+    {
+        const int Sub = 4;
+        int nx = Maze.W * Sub, ny = Maze.H * Sub;
+        var v = new List<Vector3>(); var col = new List<Color>(); var tri = new List<int>();
+        Vector3 origin = Maze.World(new Vector2Int(0, 0)) + new Vector3(-0.5f, 0, 0.5f);   // 왼쪽 위 모서리
+        for (int j = 0; j <= ny; j++)
+            for (int i = 0; i <= nx; i++)
+            {
+                float gx = i / (float)Sub, gy = j / (float)Sub;          // 격자 좌표 (셀 단위)
+                v.Add(origin + new Vector3(gx, 0, -gy));
+                float d = 9;
+                for (int cy = Mathf.FloorToInt(gy) - 1; cy <= Mathf.FloorToInt(gy) + 1; cy++)
+                    for (int cx = Mathf.FloorToInt(gx) - 1; cx <= Mathf.FloorToInt(gx) + 1; cx++)
+                    {
+                        if (!Maze.Wall(cx, cy)) continue;
+                        float dx = Mathf.Max(cx - gx, 0, gx - (cx + 1)), dy = Mathf.Max(cy - gy, 0, gy - (cy + 1));
+                        d = Mathf.Min(d, Mathf.Sqrt(dx * dx + dy * dy));
+                    }
+                float ao = Mathf.Lerp(0.58f, 1f, Mathf.SmoothStep(0, 1, d / 0.42f));
+                col.Add(new Color(ao, ao, ao, 1));
+            }
+        int row = nx + 1;
+        for (int j = 0; j < ny; j++)
+            for (int i = 0; i < nx; i++)
+            {
+                int a = j * row + i, b = a + 1, c = a + row, e = c + 1;
+                tri.Add(a); tri.Add(b); tri.Add(e); tri.Add(a); tri.Add(e); tri.Add(c);
+            }
+        var m = new Mesh { name = "Floor", indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+        m.SetVertices(v); m.SetColors(col); m.SetTriangles(tri, 0);
+        m.RecalculateNormals(); m.RecalculateBounds();
+        return m;
+    }
+
+    /// 바다: 물결이 보이도록 잘게 나눈 넓은 판
+    static Mesh BuildGrid(string name, float half, int n, float y)
+    {
+        var v = new List<Vector3>(); var tri = new List<int>();
+        for (int j = 0; j <= n; j++)
+            for (int i = 0; i <= n; i++)
+                v.Add(new Vector3(-half + 2 * half * i / n, y, -half + 2 * half * j / n));
+        for (int j = 0; j < n; j++)
+            for (int i = 0; i < n; i++)
+            {
+                int a = j * (n + 1) + i, b = a + 1, c = a + n + 1, e = c + 1;
+                tri.Add(a); tri.Add(c); tri.Add(e); tri.Add(a); tri.Add(e); tri.Add(b);
+            }
+        var m = new Mesh { name = name, indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+        m.SetVertices(v); m.SetTriangles(tri, 0);
+        m.RecalculateNormals(); m.RecalculateBounds();
+        m.bounds = new Bounds(new Vector3(0, y, 0), new Vector3(2 * half, 2, 2 * half));
+        return m;
+    }
+
+    /// 사각 테두리 (해안 거품)
+    static Mesh BuildFrame(string name, float hw, float hh, float width, float y)
+    {
+        float w0 = hw, h0 = hh, w1 = hw + width, h1 = hh + width;
+        var v = new List<Vector3>
+        {
+            new Vector3(-w1, y, -h1), new Vector3(w1, y, -h1), new Vector3(w1, y, h1), new Vector3(-w1, y, h1),
+            new Vector3(-w0, y, -h0), new Vector3(w0, y, -h0), new Vector3(w0, y, h0), new Vector3(-w0, y, h0),
+        };
+        var tri = new List<int>();
+        for (int k = 0; k < 4; k++)
+        {
+            int o0 = k, o1 = (k + 1) % 4, i0 = k + 4, i1 = (k + 1) % 4 + 4;
+            tri.Add(o0); tri.Add(i0); tri.Add(i1); tri.Add(o0); tri.Add(i1); tri.Add(o1);
+        }
+        var m = new Mesh { name = name };
+        m.SetVertices(v); m.SetTriangles(tri, 0);
+        m.RecalculateNormals(); m.RecalculateBounds();
+        return m;
+    }
+
+    GameObject MeshObject(string name, Mesh mesh, Material m, bool castShadows = false)
+    {
+        var go = new GameObject(name);
+        go.AddComponent<MeshFilter>().sharedMesh = mesh;
+        var r = go.AddComponent<MeshRenderer>(); r.sharedMaterial = m;
+        if (!castShadows) r.shadowCastingMode = ShadowCastingMode.Off;
+        return go;
     }
 
     // 지역 테마: 길 · 담 · 담 윗단 색과 담 위에 올리는 소품
@@ -276,10 +404,32 @@ public class Game : MonoBehaviour
 
         // 지형: 바다 위의 섬 — 모래사장 → 풀밭 → 길
         float mw = Maze.W * 0.5f, mh = Maze.H * 0.5f;
-        Quad("Sea", 80, 80, -0.25f, mats["Sea"]);
+        MeshObject("Sea", BuildGrid("Sea", 60, 120, -0.25f), mats["Sea"]);
+        foam = MeshObject("Foam", BuildFrame("Foam", mw + 4.2f, mh + 4.2f, 0.32f, 0), mats["Foam"]).transform;
+        foam.position = new Vector3(0, -0.22f, 0);
         Quad("Sand", mw + 4.2f, mh + 4.2f, -0.08f, mats["Sand"]);
         Quad("Grass", mw + 3.2f, mh + 3.2f, -0.03f, mats["Grass"]);
-        Quad("Floor", mw, mh, 0, mats["Floor"]);
+        MeshObject("Floor", BuildFloorMesh(), mats["Floor"]);
+
+        // 가로등: 섬 둘레 풀밭 (밤에만 켠다)
+        lamps.Clear();
+        float lx = mw + 1.2f, lz = mh + 1.2f;
+        var lampPos = new[]
+        {
+            new Vector3(-lx, 0, -lz), new Vector3(0, 0, -lz), new Vector3(lx, 0, -lz),
+            new Vector3(-lx, 0, 0), new Vector3(lx, 0, 0),
+            new Vector3(-lx, 0, lz), new Vector3(0, 0, lz), new Vector3(lx, 0, lz),
+        };
+        foreach (var p in lampPos)
+        {
+            var t = Spawn("Lamp", null).transform; t.position = p;
+            // 모델의 앞(Blender -Y)은 Unity의 -forward 쪽 → forward를 바깥으로 두면 등불이 섬 안쪽을 본다
+            t.rotation = Quaternion.LookRotation(new Vector3(p.x, 0, p.z).normalized + Vector3.forward * 0.001f);
+            var lgo2 = new GameObject("LampLight"); lgo2.transform.position = p + Vector3.up * 1.5f;
+            var l = lgo2.AddComponent<Light>(); l.type = LightType.Point; l.color = new Color(1f, 0.8f, 0.5f);
+            l.intensity = 4f; l.range = 7f; l.shadows = LightShadows.None;
+            lamps.Add(l);
+        }
 
         // 담
         var walls = new GameObject("Walls");
@@ -303,7 +453,7 @@ public class Game : MonoBehaviour
             zm.RecalculateNormals();
             var zq = new GameObject("Zone" + i);
             zq.AddComponent<MeshFilter>().sharedMesh = zm;
-            zoneMats[i] = Mat(null, new Color(0.8f, 0.14f, 0.14f), Color.black, 0, 0.08f);
+            zoneMats[i] = Flat(Mat(null, new Color(0.8f, 0.14f, 0.14f), Color.black, 0, 0.08f));
             var zr = zq.AddComponent<MeshRenderer>(); zr.sharedMaterial = zoneMats[i];
             zr.shadowCastingMode = ShadowCastingMode.Off;
             zq.SetActive(false);
@@ -379,7 +529,9 @@ public class Game : MonoBehaviour
         var model = Spawn("Lumi", holder).transform;
         model.localRotation = Quaternion.Euler(0, ModelYaw, 0); model.localScale = Vector3.one * 1.15f;
         playerT = holder; playerRing = Child(model, "Ring");
-        playerLight = AddLight(holder, Color.white, 0f, 1f);
+        playerLight = AddLight(holder, new Color(1f, 0.92f, 0.8f), 2.2f, 3.5f);   // 밤에만 켜는 작은 손전등
+        playerLight.transform.localPosition = new Vector3(0, 1.4f, 0);
+        playerRig = BuildRig(model, "Lumi");
 
         drones = new Drone[Mathf.Min(4, Maze.Docks.Count)];
         for (int i = 0; i < drones.Length; i++)
@@ -389,8 +541,8 @@ public class Game : MonoBehaviour
             var h = new GameObject("Drone" + i).transform;
             var dm = Spawn(AnimalModels[i % AnimalModels.Length], h, d.glow).transform;
             dm.localRotation = Quaternion.Euler(0, ModelYaw, 0); dm.localScale = Vector3.one * 1.15f;
-            d.tr = h; d.ring = Child(dm, "Ring"); d.wingL = Child(dm, "WingL"); d.wingR = Child(dm, "WingR");
-            d.light = AddLight(h, d.color, 0f, 1f);
+            d.tr = h; d.ring = Child(dm, "Ring");
+            d.rig = BuildRig(dm, AnimalModels[i % AnimalModels.Length]);
             drones[i] = d;
         }
     }
@@ -479,6 +631,9 @@ public class Game : MonoBehaviour
         sunLight.color = Night ? new Color(0.55f, 0.65f, 1f) : new Color(1f, 0.96f, 0.88f);
         RenderSettings.ambientLight = Night ? new Color(0.2f, 0.24f, 0.38f) : new Color(0.5f, 0.54f, 0.6f);
         mats["Sea"].SetColor("_BaseColor", Night ? new Color(0.05f, 0.16f, 0.3f) : new Color(0.12f, 0.42f, 0.58f));
+        foreach (var l in lamps) l.enabled = Night;
+        playerLight.enabled = Night;
+        mats["LampGlow"].SetColor("_EmissionColor", Night ? new Color(1f, 0.8f, 0.5f) * 1.3f : Color.black);
         cam.backgroundColor = mats["Sea"].GetColor("_BaseColor");
         fuse = FuseMax;
         ResetActors();
@@ -523,7 +678,7 @@ public class Game : MonoBehaviour
 
     void NewGame()
     {
-        score = 0; lives = 3; level = 1;
+        score = 0; lives = 3; level = startLevel;
         StartLevel();
         SetState(State.Ready);
     }
@@ -771,7 +926,149 @@ public class Game : MonoBehaviour
     void SetDroneColor(Drone d, Color c)
     {
         d.glow.SetColor("_BaseColor", c); d.glow.SetColor("_EmissionColor", c * 0.35f);
-        d.light.color = c;
+    }
+
+    static Bounds WorldBounds(Transform t)
+    {
+        var r = t.GetComponent<Renderer>();
+        return r ? r.bounds : new Bounds(t.position, Vector3.zero);
+    }
+
+    static Part MakePart(Rig r, Transform t, Vector3? pivotAt)
+    {
+        Transform p = t;
+        if (pivotAt.HasValue)
+        {
+            p = new GameObject(t.name + "Pivot").transform;
+            p.SetParent(t.parent, false);
+            p.position = pivotAt.Value;
+            p.rotation = r.holder.rotation;
+            t.SetParent(p, true);
+        }
+        var par = p.parent;
+        return new Part
+        {
+            t = p, baseRel = p.localRotation,
+            right = par.InverseTransformDirection(r.holder.right).normalized,
+            up = par.InverseTransformDirection(r.holder.up).normalized,
+            fwd = par.InverseTransformDirection(r.holder.forward).normalized,
+            side = Mathf.Sign(r.holder.InverseTransformPoint(p.position).x + 1e-4f),
+        };
+    }
+
+    /// 모델 이름으로 부품을 찾아 피벗을 단다 (holder가 원점·정면일 때 호출)
+    Rig BuildRig(Transform model, string kind)
+    {
+        var r = new Rig { kind = kind, holder = model.parent, model = model,
+            modelBase = model.localRotation, modelBasePos = model.localPosition, modelBaseScale = model.localScale };
+        Vector3 body = r.holder.position + Vector3.up * 0.45f;
+        Transform antennaTip = null; Part antenna = null;
+        foreach (var t in model.GetComponentsInChildren<Transform>(true))
+        {
+            string n = t.name;
+            if (n.StartsWith("Leg") && n.Length >= 4 && t.GetComponent<Renderer>())
+            {
+                var b = WorldBounds(t);
+                var p = MakePart(r, t, new Vector3(b.center.x, b.max.y - 0.02f, b.center.z));
+                bool left = n[3] == 'L', front = n.Length == 4 || n.EndsWith("0");
+                p.phase = left == front ? 0 : Mathf.PI;             // 네발: 대각선 다리끼리 같이 / 두발: 번갈아
+                r.legs.Add(p);
+            }
+            else if (n == "WingL" || n == "WingR")
+            {
+                if (t.GetComponent<Renderer>())
+                {
+                    var b = WorldBounds(t);
+                    r.wings.Add(MakePart(r, t, new Vector3(b.center.x, b.max.y, b.center.z)));
+                }
+                else
+                {
+                    // 박쥐: 어깨 자리의 빈 객체가 곧 축. 가져올 때 축 변환 회전이 섞여 있어 기존 회전은 버리고 로컬 Z로 직접 돌린다.
+                    var p = MakePart(r, t, null);
+                    p.baseRel = Quaternion.identity; p.fwd = Vector3.forward; p.side = n == "WingL" ? 1 : -1;
+                    r.wings.Add(p);
+                }
+            }
+            else if (n == "Tail" && t.GetComponent<Renderer>())
+                r.tails.Add(MakePart(r, t, WorldBounds(t).ClosestPoint(body)));
+            else if (n == "Antenna" && t.GetComponent<Renderer>())
+            {
+                var b = WorldBounds(t);
+                antenna = MakePart(r, t, new Vector3(b.center.x, b.min.y, b.center.z));
+                r.antennas.Add(antenna);
+            }
+            else if (n == "AntennaTip") antennaTip = t;
+            else if ((n == "EyeL" || n == "EyeR") && kind == "Lumi" && t.GetComponent<Renderer>())
+                r.eyes.Add(MakePart(r, t, WorldBounds(t).center));
+        }
+        if (antenna != null && antennaTip) antennaTip.SetParent(antenna.t, true);
+        return r;
+    }
+
+    void UpdateRig(Rig r, float dt, bool scared, bool idle)
+    {
+        var h = r.holder;
+        Vector3 pos = h.position; pos.y = 0;
+        if (!r.init) { r.lastPos = pos; r.lastYaw = h.eulerAngles.y; r.init = true; }
+        float dist = (pos - r.lastPos).magnitude; r.lastPos = pos;
+        if (dist > 1.5f) dist = 0;                                       // 리셋으로 순간이동한 경우
+        float spd = dt > 0 ? dist / dt : 0;
+        r.move = Mathf.Lerp(r.move, Mathf.Clamp01(spd / 3.5f), 1 - Mathf.Exp(-10 * dt));
+        float yaw = h.eulerAngles.y, yawRate = dt > 0 ? Mathf.DeltaAngle(r.lastYaw, yaw) / dt : 0; r.lastYaw = yaw;
+        r.roll = Mathf.Lerp(r.roll, Mathf.Clamp(-yawRate * 0.025f, -14, 14), 1 - Mathf.Exp(-8 * dt));
+        if (Mathf.Abs(yawRate) > 250) r.squash = Mathf.Max(r.squash, 0.7f);
+        r.squash = Mathf.MoveTowards(r.squash, 0, dt * 3.5f);
+        float stride = r.kind == "Chicken" ? 9f : r.kind == "Boar" ? 6.5f : 5f;   // 한 칸 걸을 때 도는 각(라디안)
+        r.gait += dist * stride;
+
+        float m = r.move, g = r.gait, t = time;
+        float pitch = 0, roll = r.roll, lift = 0, jx = 0;
+        Vector3 sc = Vector3.one;
+        switch (r.kind)
+        {
+            case "Lumi":
+                pitch = 12 * m;
+                sc = new Vector3(1 + 0.12f * r.squash, 1 - 0.15f * r.squash, 1 + 0.12f * r.squash);
+                break;
+            case "Wolf":
+                lift = Mathf.Abs(Mathf.Sin(g)) * 0.05f * m; pitch = Mathf.Sin(2 * g) * 3 * m; break;
+            case "Boar":
+                lift = Mathf.Abs(Mathf.Sin(g)) * 0.04f * m; pitch = 5 * m + Mathf.Sin(2 * g) * 3 * m; break;
+            case "Chicken":
+                roll += Mathf.Sin(g) * 9 * m; pitch = 6 * m + Mathf.Sin(2 * g) * 5 * m;
+                lift = Mathf.Abs(Mathf.Sin(g)) * 0.03f * m; break;
+            case "Bat":
+                pitch = 12 * m; break;
+        }
+        if (scared) jx = Mathf.Sin(t * 45) * 0.025f;                    // 겁먹으면 부들부들
+        if (idle) sc.y *= 1 + 0.03f * Mathf.Sin(t * 3);                 // 숨쉬기
+        r.model.localPosition = r.modelBasePos + new Vector3(jx, lift, 0);
+        r.model.localRotation = Quaternion.Euler(pitch, 0, roll) * r.modelBase;
+        r.model.localScale = Vector3.Scale(r.modelBaseScale, sc);
+
+        float legAmp = r.kind == "Chicken" ? 38 : 30;
+        foreach (var p in r.legs)
+            p.t.localRotation = Quaternion.AngleAxis(Mathf.Sin(g + p.phase) * legAmp * m, p.right) * p.baseRel;
+        foreach (var p in r.wings)
+        {
+            float a = r.kind == "Bat" ? 38 * Mathf.Sin(t * (14 + 6 * m))
+                    : scared ? 35 * Mathf.Sin(t * 22) : 12 * m * Mathf.Sin(t * 18);
+            p.t.localRotation = Quaternion.AngleAxis(a * p.side, p.fwd) * p.baseRel;
+        }
+        foreach (var p in r.tails)
+        {
+            float a = r.kind == "Wolf" ? 20 * Mathf.Sin(t * 7) : 28 * Mathf.Sin(t * 13);
+            p.t.localRotation = Quaternion.AngleAxis(a, p.up) * p.baseRel;
+        }
+        foreach (var p in r.antennas)
+            p.t.localRotation = Quaternion.AngleAxis(-16 * m + 5 * Mathf.Sin(t * 4) + r.squash * 10, p.right) * p.baseRel;
+        if (r.eyes.Count > 0)
+        {
+            r.blinkT -= dt;
+            float lid = r.blinkT < 0 ? 0.15f : 1f;
+            if (r.blinkT < -0.13f) r.blinkT = UnityEngine.Random.Range(2f, 5f);
+            foreach (var p in r.eyes) p.t.localScale = new Vector3(1, lid, 1);
+        }
     }
 
     void Animate(float dt)
@@ -782,22 +1079,22 @@ public class Game : MonoBehaviour
             playerT.position = player.Pos + Vector3.up * (0.06f + 0.04f * Mathf.Sin(time * 5));
             var look = Quaternion.LookRotation(new Vector3(facing.x, 0, -facing.y));
             playerT.rotation = Quaternion.Slerp(playerT.rotation, look, 1 - Mathf.Exp(-18 * dt));
+            UpdateRig(playerRig, dt, false, player.dir == Vector2Int.zero);
         }
         if (playerRing) playerRing.Rotate(0, 0, 240 * dt, Space.Self);
-        
 
-        // 드론
+        // 야생동물
         foreach (var d in drones)
         {
-            float bob = 0.08f + 0.05f * Mathf.Sin(time * 4 + d.kind * 1.7f);
+            bool flying = d.rig.kind == "Bat";
+            float bob = flying ? 0.12f + 0.06f * Mathf.Sin(time * 4 + d.kind * 1.7f) : 0f;
             d.tr.position = d.m.Pos + Vector3.up * bob;
-            Vector2Int f = d.m.dir != Vector2Int.zero ? d.m.dir : Vector2Int.up;
-            Vector3 toP = d.vulnerable || d.dock > 0 ? new Vector3(f.x, 0, -f.y) : playerT.position - d.tr.position;
-            toP.y = 0;
-            if (toP.sqrMagnitude > 0.001f) d.tr.rotation = Quaternion.Slerp(d.tr.rotation, Quaternion.LookRotation(toP), 1 - Mathf.Exp(-8 * dt));
+            Vector3 face = d.m.dir != Vector2Int.zero ? new Vector3(d.m.dir.x, 0, -d.m.dir.y) : playerT.position - d.tr.position;
+            face.y = 0;
+            if (face.sqrMagnitude > 0.001f) d.tr.rotation = Quaternion.Slerp(d.tr.rotation, Quaternion.LookRotation(face), 1 - Mathf.Exp(-12 * dt));
             if (d.ring) { float rs = 1 + 0.08f * Mathf.Sin(time * 5 + d.kind); d.ring.localScale = new Vector3(rs, rs, rs); }
-            if (d.wingL) { float flap = 35 * Mathf.Sin(time * 16); d.wingL.localRotation = Quaternion.Euler(0, 0, flap); d.wingR.localRotation = Quaternion.Euler(0, 0, -flap); }
             d.tr.localScale = Vector3.one * (d.dock > 0 ? 0.75f : d.vulnerable ? 0.85f : 1f);
+            UpdateRig(d.rig, dt, d.vulnerable, d.dock > 0 || d.m.dir == Vector2Int.zero);
             if (d.vulnerable && emp < 2f) SetDroneColor(d, Mathf.Repeat(emp * 5, 1) > 0.5f ? Color.white : Scared);
         }
 
@@ -815,6 +1112,15 @@ public class Game : MonoBehaviour
         Vector3 off = new Vector3(playerT.position.x, 0, playerT.position.z) * 0.06f;
         cam.transform.position = Vector3.Lerp(cam.transform.position, camBase + off, 1 - Mathf.Exp(-3 * dt));
         cam.transform.rotation = Quaternion.LookRotation(camLook - camBase);
+        if (closeTarget)   // 검증용 근접 촬영
+        {
+            Vector3 p = closeTarget.position; p.y = 0;
+            cam.transform.position = p + new Vector3(1.2f, 2.6f, -2.4f);
+            cam.transform.LookAt(p + Vector3.up * 0.4f);
+        }
+
+        // 해안 거품: 물결 따라 오르내린다
+        if (foam) foam.position = new Vector3(0, -0.23f + 0.035f * Mathf.Sin(time * 1.4f), 0);
 
         // 문구
         if (popT > 0) { popT -= dt; popText.rectTransform.anchoredPosition += Vector2.up * 30 * dt; if (popT <= 0) popText.text = ""; }
@@ -839,7 +1145,7 @@ public class Game : MonoBehaviour
         var sz = ps.sizeOverLifetime; sz.enabled = true; sz.size = new ParticleSystem.MinMaxCurve(1, AnimationCurve.Linear(0, 1, 1, 0));
         var r = go.GetComponent<ParticleSystemRenderer>();
         r.renderMode = ParticleSystemRenderMode.Mesh; r.mesh = cubeMesh;
-        var m = new Material(litBase); m.SetColor("_BaseColor", c); m.SetColor("_EmissionColor", c * 0.3f);
+        var m = Flat(new Material(litBase)); m.SetColor("_BaseColor", c); m.SetColor("_EmissionColor", c * 0.3f);
         r.sharedMaterial = m;
         ps.Emit(n);
         Destroy(go, 1.5f); Destroy(m, 1.6f);
@@ -853,6 +1159,20 @@ public class Game : MonoBehaviour
         if (shotStage == 0 && t > 2f) { ScreenCapture.CaptureScreenshot(shotPath + "_title.png"); shotStage = 1; }
         else if (shotStage == 1 && t > 3f) { NewGame(); shotStage = 2; }
         else if (shotStage == 2 && t > 12f) { ScreenCapture.CaptureScreenshot(shotPath + "_play.png"); shotStage = 3; }
-        else if (shotStage == 3 && t > 13.5f) { Application.Quit(); shotStage = 4; }
+        else if (shotStage >= 3 && shotStage < 3 + CloseShots.Length * 2)
+        {
+            // 근접 촬영: 대상마다 0.5초 따라간 뒤 찍는다
+            int k = (shotStage - 3) / 2; bool capture = (shotStage - 3) % 2 == 1;
+            float at = 12.3f + k * 0.9f + (capture ? 0.55f : 0f);
+            if (t > at)
+            {
+                if (!capture) closeTarget = CloseShots[k] < 0 ? playerT : drones[CloseShots[k]].tr;
+                else ScreenCapture.CaptureScreenshot(shotPath + "_close" + k + ".png");
+                shotStage++;
+            }
+        }
+        else if (shotStage == 3 + CloseShots.Length * 2 && t > 12.3f + CloseShots.Length * 0.9f + 0.5f) { Application.Quit(); shotStage++; }
     }
+    static readonly int[] CloseShots = { -1, 0, 1, 2, 3 };   // 루미, 늑대, 박쥐, 멧돼지, 닭
+    Transform closeTarget;
 }

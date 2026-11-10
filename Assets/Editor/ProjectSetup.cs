@@ -22,7 +22,7 @@ public static class ProjectSetup
         var rd = ScriptableObject.CreateInstance<UniversalRendererData>();
         AssetDatabase.CreateAsset(rd, "Assets/Settings/Renderer.asset");
         rd.postProcessData = AssetDatabase.LoadAssetAtPath<PostProcessData>("Packages/com.unity.render-pipelines.universal/Runtime/Data/PostProcessData.asset");
-        rd.renderingMode = RenderingMode.ForwardPlus;
+        rd.renderingMode = RenderingMode.Forward;   // 툰 셰이더의 보조 조명(가로등) 반복문이 Forward 방식을 쓴다
         EditorUtility.SetDirty(rd);
         var urp = UniversalRenderPipelineAsset.Create(rd);
         urp.supportsHDR = true;
@@ -45,6 +45,13 @@ public static class ProjectSetup
         lit.globalIlluminationFlags = MaterialGlobalIlluminationFlags.None;
         lit.SetColor("_EmissionColor", Color.black);
         AssetDatabase.CreateAsset(lit, "Assets/Resources/Materials/LitBase.mat");
+        var toonShader = Shader.Find("Lumia/Toon");
+        if (toonShader != null)
+        {
+            var toon = new Material(toonShader);
+            AssetDatabase.CreateAsset(toon, "Assets/Resources/Materials/ToonBase.mat");
+        }
+        else Debug.LogError("[ProjectSetup] Lumia/Toon 셰이더를 찾지 못했습니다");
 
         // 빈 장면 (게임이 실행 중에 모든 것을 만든다)
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);

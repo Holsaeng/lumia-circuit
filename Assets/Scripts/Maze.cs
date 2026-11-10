@@ -134,6 +134,10 @@ public static class Maze
             }
         var m = new Mesh { name = "Walls", indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
         m.SetVertices(v);
+        // 담 아래쪽일수록 어둡게 (땅에 닿는 곳의 그늘)
+        var col = new List<Color>(v.Count);
+        foreach (var p in v) { float a = Mathf.Lerp(0.55f, 1f, Mathf.Clamp01(p.y / h)); col.Add(new Color(a, a, a, 1)); }
+        m.SetColors(col);
         m.subMeshCount = 2;
         m.SetTriangles(body, 0);
         m.SetTriangles(glow, 1);

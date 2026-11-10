@@ -57,6 +57,8 @@ P = {
     "Stone": lambda: mat("Stone", (0.5, 0.5, 0.52), rough=0.95),
     "Wood": lambda: mat("Wood", (0.6, 0.44, 0.26), rough=0.9),
     "WoodDark": lambda: mat("WoodDark", (0.38, 0.26, 0.15), rough=0.9),
+    "LampPole": lambda: mat("LampPole", (0.2, 0.21, 0.24), rough=0.6),
+    "LampGlow": lambda: mat("LampGlow", (1.0, 0.86, 0.6), rough=0.5),
 }
 
 def ico(loc, r, sub=1):
@@ -249,8 +251,17 @@ def make_bonus():     # 항공 보급 상자
     cube((0, 0, 0.215), 0.1);               finish("Beacon", "BonusGlow", smooth=False, bevel=0.01, parent=R, scale=(1, 1, 0.5))
     return R
 
+def make_lamp():
+    R = empty("Lamp")
+    cyl((0, 0, 0.05), 0.13, 0.1, 12);          finish("Base", "LampPole", smooth=False, parent=R)
+    cyl((0, 0, 0.8), 0.035, 1.5, 12);          finish("Pole", "LampPole", parent=R)
+    cube((0, -0.16, 1.52));                     finish("Arm", "LampPole", smooth=False, parent=R, scale=(0.03, 0.2, 0.03))
+    cone((0, -0.3, 1.47), 0.13, 0.05, 0.1, 12); finish("Shade", "LampPole", smooth=False, parent=R)
+    sphere((0, -0.3, 1.4), 0.07, 16, 8);        finish("Bulb", "LampGlow", parent=R)
+    return R
+
 ASSETS = [make_lumi(), make_chicken(), make_bat(), make_boar(), make_wolf(), make_cell(), make_core(), make_bonus(),
-          make_tree(), make_bush(), make_rock(), make_crate()]
+          make_tree(), make_bush(), make_rock(), make_crate(), make_lamp()]
 
 # ---------- FBX 내보내기 (에셋별 1파일) ----------
 def export(r):
